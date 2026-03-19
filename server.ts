@@ -6,15 +6,12 @@ import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
 import { spawn, exec } from 'child_process';
-import { promisify } from 'util';
-const execAsync = promisify(exec);
 import { createProxyMiddleware } from 'http-proxy-middleware';
 import cors from 'cors';
 import net from 'net';
 import treeKill from 'tree-kill';
-import archiver from 'archiver';
 
-const PORT = Number(process.env.PORT) || 3000;
+const PORT = 3000;
 const PROJECTS_DIR = path.join(process.cwd(), 'projects');
 
 const STATE_FILE = path.join(process.cwd(), 'state.json');
@@ -97,20 +94,22 @@ if (!fs.existsSync(PROJECTS_DIR)) {
 }
 
 // Helper to handle module errors
-async function handleModuleError(output: string, socket: any, stack: string, projectPath: string) {
+function handleModuleError(output: string, socket: any, stack: string, projectPath: string) {
   if (output.includes('ModuleNotFoundError') || output.includes('Cannot find module')) {
     const match = output.match(/No module named ['"]([^'"]+)['"]/) || output.match(/Cannot find module ['"]([^'"]+)['"]/);
     if (match && match[1]) {
       const moduleName = match[1];
       socket.emit('log', `System: Missing module "${moduleName}" detected. Attempting auto-fix...`);
+      // FIX: Added --break-system-packages to pip install for Render compatibility
       const installCmd = stack === 'python' ? `pip install ${moduleName} --break-system-packages` : `npm install ${moduleName}`;
       socket.emit('log', `System: Running ${installCmd}...`);
-      try {
-        await execAsync(installCmd, { cwd: projectPath });
-        socket.emit('log', `SUCCESS: ${moduleName} installed. Please restart the project.`);
-      } catch (err: any) {
-        socket.emit('log', `ERROR: Failed to install ${moduleName}: ${err.message}`);
-      }
+      exec(installCmd, { cwd: projectPath }, (err) => {
+        if (err) {
+          socket.emit('log', `ERROR: Failed to install ${moduleName}: ${err.message}`);
+        } else {
+          socket.emit('log', `SUCCESS: ${moduleName} installed. Please restart the project.`);
+        }
+      });
     }
   }
 
@@ -358,18 +357,6 @@ async function autoFixProject(projectPath: string, socket: any) {
     if (fixedAny) {
       socket.emit('log', 'System: Auto-fix completed for some files. Retrying execution...');
     }
-
-    // Auto-install dependencies if requirements.txt exists for Python projects
-    const requirementsPath = path.join(projectPath, 'requirements.txt');
-    if (fs.existsSync(requirementsPath)) {
-      socket.emit('log', 'System: requirements.txt detected. Installing dependencies...');
-      try {
-        await execAsync('pip install -r requirements.txt --break-system-packages', { cwd: projectPath });
-        socket.emit('log', 'SUCCESS: requirements.txt dependencies installed.');
-      } catch (err: any) {
-        socket.emit('log', `System Warning: Failed to auto-install requirements.txt: ${err.message}`);
-      }
-    }
   } catch (err: any) {
     socket.emit('log', `System Warning: Auto-fix failed: ${err.message}`);
   }
@@ -498,46 +485,6 @@ async function startServer() {
     }
   });
 
-  // API: Export project as ZIP
-  app.get('/api/export-project', async (req, res) => {
-    const projectId = req.headers['x-project-id'] as string;
-    if (!projectId) return res.status(400).json({ error: 'Missing project ID' });
-    
-    const projectPath = path.join(PROJECTS_DIR, projectId);
-    if (!fs.existsSync(projectPath)) return res.status(404).json({ error: 'Project not found' });
-
-    try {
-      const archive = archiver('zip', {
-        zlib: { level: 9 } // Sets the compression level.
-      });
-
-      // Listen for errors
-      archive.on('error', (err) => {
-        console.error('Archiver error:', err);
-        if (!res.headersSent) {
-          res.status(500).json({ error: err.message });
-        }
-      });
-
-      res.setHeader('Content-Type', 'application/zip');
-      res.setHeader('Content-Disposition', `attachment; filename="${projectId}.zip"`);
-
-      // Pipe archive data to the response
-      archive.pipe(res);
-
-      // Append files from a sub-directory, putting its contents at the root of archive
-      archive.directory(projectPath, false);
-
-      // Finalize the archive (ie we are done appending files but streams have to finish yet)
-      await archive.finalize();
-    } catch (err: any) {
-      console.error('Failed to export project:', err);
-      if (!res.headersSent) {
-        res.status(500).json({ error: err.message });
-      }
-    }
-  });
-
   // API: Reset session
   app.post('/api/reset-session', (req, res) => {
     const projectId = req.headers['x-project-id'] as string;
@@ -659,12 +606,12 @@ async function startServer() {
           .glow { box-shadow: 0 0 50px ${themeColor}22; }
           @keyframes float { 0%, 100% { transform: translateY(0) rotate(0deg); } 50% { transform: translateY(-15px) rotate(2deg); } }
           .float { animation: float 5s ease-in-out infinite; }
-          .glow-bg { background: radial-gradient(circle at 50% 50%, ${themeColor}11 0%, transparent 70%); }
+          .bg-gradient { background: radial-gradient(circle at 50% 50%, ${themeColor}11 0%, transparent 70%); }
           .construction-stripe { background: repeating-linear-gradient(45deg, #eab308, #eab308 10px, #000 10px, #000 20px); height: 6px; width: 100%; }
         </style>
       </head>
       <body class="flex items-center justify-center min-h-screen p-6">
-        <div class="absolute inset-0 glow-bg"></div>
+        <div class="absolute inset-0 bg-gradient"></div>
         
         <div class="card-3d glass glow p-10 rounded-[2.5rem] max-w-md w-full text-center relative z-10 float border-t-4" style="border-color: ${themeColor}">
           ${isOffline ? '<div class="construction-stripe absolute top-0 left-0 rounded-t-[2.5rem]"></div>' : ''}
@@ -682,35 +629,35 @@ async function startServer() {
             <div class="flex flex-col gap-3">
               <a href="https://wa.me/14389423427?text=Olá Thayson! 🚀 Vi que o link do seu bot está desabilitado ou fora do ar no momento. 🛠️ Gostaria de saber o que aconteceu e como posso ajudar a trazer o projeto de volta! ⚡" target="_blank" class="w-full py-5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-2xl font-black text-lg transition-all transform active:scale-95 flex items-center justify-center gap-3 shadow-lg shadow-emerald-900/20">
                 <svg class="w-6 h-6" fill="currentColor" viewBox="0 0 24 24"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.414 0 .018 5.394 0 12.03c0 2.12.54 4.19 1.563 6.04L0 24l6.15-1.612a11.77 11.77 0 005.891 1.569h.005c6.636 0 12.032-5.395 12.035-12.031a11.762 11.762 0 00-3.418-8.525z"/></svg>
-685:                 <span>Falar com Thayson</span>
-686:               </a>
-687:               <a href="https://www.instagram.com/7p_thayson/" target="_blank" class="w-full py-4 bg-zinc-100 hover:bg-white text-zinc-950 rounded-2xl font-bold transition-all transform active:scale-95 flex items-center justify-center gap-2">
-688:                 <span>Seguir no Instagram</span>
-689:               </a>
-690:             </div>
-691:             
-692:             ${autoRefresh ? `
-693:               <div class="pt-6 border-t border-zinc-800">
-694:                 <div class="flex items-center justify-center gap-2 mb-2">
-695:                   <div class="w-2 h-2 rounded-full bg-amber-500 animate-pulse"></div>
-696:                   <p class="text-[10px] text-zinc-500 uppercase tracking-[0.2em] font-black">Recarregando em 5s</p>
-697:                 </div>
-698:                 <script>setTimeout(() => window.location.reload(), 5000);</script>
-699:               </div>
-700:             ` : `
-701:               <div class="pt-6 border-t border-zinc-800">
-702:                 <p class="text-[10px] text-zinc-600 uppercase tracking-[0.2em] font-black">Link Temporariamente Indisponível</p>
-703:               </div>
-704:             `}
-705:           </div>
-706:         </div>
-707:         
-708:         <div class="fixed bottom-8 left-1/2 -translate-x-1/2 text-zinc-800 text-[10px] uppercase tracking-[0.4em] font-black">
-709:           Project Porter System • 2026
-710:         </div>
-711:       </body>
-712:     </html>
-713:   `;
+                <span>Falar com Thayson</span>
+              </a>
+              <a href="https://www.instagram.com/7p_thayson/" target="_blank" class="w-full py-4 bg-zinc-100 hover:bg-white text-zinc-950 rounded-2xl font-bold transition-all transform active:scale-95 flex items-center justify-center gap-2">
+                <span>Seguir no Instagram</span>
+              </a>
+            </div>
+            
+            ${autoRefresh ? `
+              <div class="pt-6 border-t border-zinc-800">
+                <div class="flex items-center justify-center gap-2 mb-2">
+                  <div class="w-2 h-2 rounded-full bg-amber-500 animate-pulse"></div>
+                  <p class="text-[10px] text-zinc-500 uppercase tracking-[0.2em] font-black">Recarregando em 5s</p>
+                </div>
+                <script>setTimeout(() => window.location.reload(), 5000);</script>
+              </div>
+            ` : `
+              <div class="pt-6 border-t border-zinc-800">
+                <p class="text-[10px] text-zinc-600 uppercase tracking-[0.2em] font-black">Link Temporariamente Indisponível</p>
+              </div>
+            `}
+          </div>
+        </div>
+        
+        <div class="fixed bottom-8 left-1/2 -translate-x-1/2 text-zinc-800 text-[10px] uppercase tracking-[0.4em] font-black">
+          Project Porter System • 2026
+        </div>
+      </body>
+    </html>
+  `;
   };
 
   // 2. Start/Restart the Tunnel Proxy Server
@@ -1032,7 +979,7 @@ async function executeProjectCommand(socket: any, projectId: string, command: st
     });
     saveState();
 
-    child.stdout.on('data', async (data) => {
+    child.stdout.on('data', (data) => {
       const output = data.toString();
       const project = activeProjects.get(projectId);
       if (project) {
@@ -1040,7 +987,7 @@ async function executeProjectCommand(socket: any, projectId: string, command: st
         if (project.logs.length > 1000) project.logs.shift();
       }
       socket.emit('log', output);
-      await handleModuleError(output, socket, stack, projectPath);
+      handleModuleError(output, socket, stack, projectPath);
       if (output.includes('Error: Cannot find module')) {
         const match = output.match(/Cannot find module ['"]\.\/([^'"]+)['"]/);
         if (match && match[1]) {
@@ -1049,7 +996,7 @@ async function executeProjectCommand(socket: any, projectId: string, command: st
       }
     });
 
-    child.stderr.on('data', async (data) => {
+    child.stderr.on('data', (data) => {
       const errorMsg = data.toString();
       const project = activeProjects.get(projectId);
       if (project) {
@@ -1057,7 +1004,7 @@ async function executeProjectCommand(socket: any, projectId: string, command: st
         if (project.logs.length > 1000) project.logs.shift();
       }
       socket.emit('log', `ERROR: ${errorMsg}`);
-      await handleModuleError(errorMsg, socket, stack, projectPath);
+      handleModuleError(errorMsg, socket, stack, projectPath);
       if (errorMsg.includes('Error: Cannot find module') && !errorMsg.includes('node_modules')) {
         socket.emit('log', 'System: Local module import failed. Checking if the file exists in a different directory...');
       }
@@ -1125,6 +1072,7 @@ io.on('connection', (socket) => {
       }
 
       const command = stack === 'python' ? 'pip' : 'npm';
+      // FIX: Added --break-system-packages for Render/Python environment
       const args = stack === 'python' ? ['install', '-r', 'requirements.txt', '--break-system-packages'] : ['install'];
       
       socket.emit('log', `System: Starting installation: ${command} ${args.join(' ')}...`);
@@ -1220,7 +1168,7 @@ io.on('connection', (socket) => {
     createProxyMiddleware({
       target,
       changeOrigin: true,
-      pathRewrite: (path) => path.relative(/^\/p\/[^/]+/, ''),
+      pathRewrite: (path) => path.replace(/^\/p\/[^/]+/, ''),
       ws: true,
       on: {
         error: (err, req, res) => {
