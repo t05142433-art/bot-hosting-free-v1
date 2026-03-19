@@ -156,6 +156,48 @@ function handleModuleError(output: string, socket: any, stack: string, projectPa
 // Helper to auto-fix project files
 async function autoFixProject(projectPath: string, socket: any) {
   try {
+    // --- [NOVO] SISTEMA DE AUTO-CORREÇÃO DE ESTRUTURA DE ARQUIVOS ---
+    socket.emit('log', 'System: Scanning project structure for path optimization...');
+    
+    const foldersToFlatten = ['templates', 'views', 'public', 'src', 'client', 'frontend', 'app', 'dist'];
+    const movedFiles: string[] = [];
+
+    // 1. Mover arquivos de pastas conhecidas para a raiz
+    foldersToFlatten.forEach(folderName => {
+      const folderPath = path.join(projectPath, folderName);
+      if (fs.existsSync(folderPath) && fs.statSync(folderPath).isDirectory()) {
+        const filesInFolder = fs.readdirSync(folderPath);
+        filesInFolder.forEach(file => {
+          const oldFileFull = path.join(folderPath, file);
+          const newFileFull = path.join(projectPath, file);
+          
+          // Apenas move se não houver conflito na raiz
+          if (fs.statSync(oldFileFull).isFile() && !fs.existsSync(newFileFull)) {
+            fs.renameSync(oldFileFull, newFileFull);
+            movedFiles.push(`${folderName}/${file}`);
+          }
+        });
+      }
+    });
+
+    if (movedFiles.length > 0) {
+      socket.emit('log', `System: Flattened ${movedFiles.length} files to root: ${movedFiles.join(', ')}`);
+    }
+
+    // --- [NOVO] AUTO SCAN E PATCH DE CAMINHOS NO CÓDIGO ---
+    const executablePriority = ['server.js', 'index.js', 'app.js', 'main.py', 'bot.py', 'run.py'];
+    let mainFile = '';
+    
+    const rootFiles = fs.readdirSync(projectPath);
+    for (const priority of executablePriority) {
+      if (rootFiles.includes(priority)) {
+        mainFile = priority;
+        break;
+      }
+    }
+
+    // --- FIM DO NOVO SISTEMA DE ESTRUTURA ---
+
     // FIX: Auto-rename "template" folder to "templates" for Flask/AIDE compatibility
     const oldTemplatePath = path.join(projectPath, 'template');
     const newTemplatePath = path.join(projectPath, 'templates');
@@ -235,6 +277,27 @@ async function autoFixProject(projectPath: string, socket: any) {
       // Skip if file has // no-autofix
       if (content.includes('// no-autofix') || content.includes('# no-autofix')) {
         continue;
+      }
+
+      // --- [NOVO] INJETAR PATCH DE CAMINHOS DINÂMICOS ---
+      let fileFixedStructure = false;
+      foldersToFlatten.forEach(folder => {
+          // Regex para detectar "templates/index.html", 'views/home.html', etc.
+          const pathRegex = new RegExp(`(['"\`])${folder}\\/([^'"\`]+)(['"\`])`, 'g');
+          if (pathRegex.test(content)) {
+              content = content.replace(pathRegex, `$1$2$3`);
+              fileFixedStructure = true;
+          }
+
+          // Especial para Express: express.static("public") -> express.static(".")
+          if (content.includes(`static("${folder}")`) || content.includes(`static('${folder}')`)) {
+            content = content.replace(`static("${folder}")`, `static(".")`).replace(`static('${folder}')`, `static(".")`);
+            fileFixedStructure = true;
+          }
+      });
+
+      if (fileFixedStructure) {
+        socket.emit('log', `System: Auto-patched file paths in ${file} to use root directory.`);
       }
       
       // Fix hardcoded ports (3000, 3001, 5000, 8080, etc)
@@ -318,7 +381,7 @@ async function autoFixProject(projectPath: string, socket: any) {
         }
       }
 
-      if (fileFixed) {
+      if (fileFixed || fileFixedStructure) {
         fs.writeFileSync(filePath, content);
         fixedAny = true;
       }
