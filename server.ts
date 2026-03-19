@@ -156,6 +156,14 @@ function handleModuleError(output: string, socket: any, stack: string, projectPa
 // Helper to auto-fix project files
 async function autoFixProject(projectPath: string, socket: any) {
   try {
+    // FIX: Auto-rename "template" folder to "templates" for Flask/AIDE compatibility
+    const oldTemplatePath = path.join(projectPath, 'template');
+    const newTemplatePath = path.join(projectPath, 'templates');
+    if (fs.existsSync(oldTemplatePath) && !fs.existsSync(newTemplatePath)) {
+        socket.emit('log', 'System: Renaming "template" folder to "templates" for Flask compatibility...');
+        fs.renameSync(oldTemplatePath, newTemplatePath);
+    }
+
     const listFilesRecursive = (dir: string): string[] => {
       let results: string[] = [];
       const list = fs.readdirSync(dir);
@@ -876,7 +884,7 @@ async function executeProjectCommand(socket: any, projectId: string, command: st
   const findRoot = (dir: string): string | null => {
     try {
       const files = fs.readdirSync(dir);
-      if (files.includes('package.json') || files.includes('requirements.txt') || files.includes('main.py') || files.includes('app.py')) {
+      if (files.includes('package.json') || files.includes('requirements.txt') || files.includes('main.py') || files.includes('app.py') || files.includes('bot.py')) {
         return dir;
       }
       for (const file of files) {
